@@ -14,6 +14,8 @@ class gps
         bool checkGpsFix();
         void buildPacket(uint8_t txBuffer[9]);
         void encode();
+        double lat();
+        double lng(); 
 
     private:
         uint32_t LatitudeBinary, LongitudeBinary;

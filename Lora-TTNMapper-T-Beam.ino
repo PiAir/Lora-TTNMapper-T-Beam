@@ -6,6 +6,17 @@
 #include "config.h"
 #include "gps.h"
 
+#define uS_TO_S_FACTOR 1000000  /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP  30        /* Time ESP32 will go to sleep (in seconds) */
+
+RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR u4_t RTC_seqnoUp = 0;
+
+RTC_DATA_ATTR double prevLat = 0;
+RTC_DATA_ATTR double prevLon = 0;
+RTC_DATA_ATTR int statCount = 0;
+double dist = 0;
+
 // T-Beam specific hardware
 #define BUILTIN_LED 21
 
@@ -77,7 +88,11 @@ void onEvent (ev_t ev) {
         Serial.println(s);
       }
       // Schedule next transmission
-      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+      // os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+      // go into deep sleep for TX_interval
+      RTC_seqnoUp = LMIC.seqnoUp;
+      esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+      esp_deep_sleep_start();
       break;
     case EV_LOST_TSYNC:
       Serial.println(F("EV_LOST_TSYNC"));
@@ -112,11 +127,30 @@ void do_send(osjob_t* j) {
   { 
     if (gps.checkGpsFix())
     {
-      // Prepare upstream data transmission at the next possible time.
-      gps.buildPacket(txBuffer);
-      LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
-      Serial.println(F("Packet queued"));
-      digitalWrite(BUILTIN_LED, HIGH);
+      dist = TinyGPSPlus::distanceBetween(gps.lat(), gps.lng(), prevLat, prevLon);
+      if (dist > 50 || statCount > 9) {
+        Serial.println("Distance moved: " + String(dist));
+        Serial.println("Time stationary: " + String(statCount * TIME_TO_SLEEP * uS_TO_S_FACTOR));
+        if (dist <= 50) {
+          Serial.println("Sending because stationary for longer than max.");
+        }
+        statCount = 0;
+        prevLat = gps.lat();
+        prevLon = gps.lng();
+        // Prepare upstream data transmission at the next possible time.
+        gps.buildPacket(txBuffer);
+        LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
+        Serial.println(F("Packet queued"));
+        digitalWrite(BUILTIN_LED, HIGH);
+      } else {
+        Serial.println("Not sending, stationary.");
+        Serial.println("Distance moved: " + String(dist));
+        Serial.println("Time stationary: " + String(statCount * TIME_TO_SLEEP * uS_TO_S_FACTOR));
+        ++statCount;
+        RTC_seqnoUp = LMIC.seqnoUp;
+        esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+        esp_deep_sleep_start();        
+      }
     }
     else
     {
@@ -127,9 +161,35 @@ void do_send(osjob_t* j) {
   // Next TX is scheduled after TX_COMPLETE event.
 }
 
+
+void print_wakeup_reason() {
+  esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch (wakeup_reason)
+  {
+    case 1  : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case 2  : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case 3  : Serial.println("Wakeup caused by timer"); break;
+    case 4  : Serial.println("Wakeup caused by touchpad"); break;
+    case 5  : Serial.println("Wakeup caused by ULP program"); break;
+    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason); break;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println(F("TTN Mapper"));
+
+  //Increment boot number and print it every reboot
+  ++bootCount;
+  Serial.println("Boot number: " + String(bootCount));
+  Serial.println("RTC_seqnoUp: " + String(RTC_seqnoUp));
+  Serial.println("Stationary Counter: " + String(statCount));       
+
+  //Print the wakeup reason for ESP32
+  print_wakeup_reason();    
   
   //Turn off WiFi and Bluetooth
   WiFi.mode(WIFI_OFF);
@@ -161,6 +221,8 @@ void setup() {
 
   // Set data rate and transmit power for uplink (note: txpow seems to be ignored by the library)
   LMIC_setDrTxpow(DR_SF7,14); 
+
+  LMIC.seqnoUp = RTC_seqnoUp;
 
   do_send(&sendjob);
   pinMode(BUILTIN_LED, OUTPUT);

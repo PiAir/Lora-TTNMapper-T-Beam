@@ -87,3 +87,13 @@ bool gps::checkGpsFix()
     return false;
   }
 }
+
+double gps::lat() 
+{
+  return tGps.location.lat();  
+}
+
+double gps::lng() 
+{
+  return tGps.location.lng();  
+}
